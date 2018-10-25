@@ -12,6 +12,13 @@
 #include "caffe/caffe.hpp"
 #include "caffe/parallel.hpp"
 
+#ifdef USE_RCCL
+#include "rccl/rccl.h"
+#include "rcclCheck.h"
+#endif 
+#include <iostream>
+using namespace std;
+
 namespace caffe {
 
 enum Op {
@@ -218,7 +225,7 @@ P2PSync<Dtype>::P2PSync(shared_ptr<Solver<Dtype> > root_solver,
     solver_ = root_solver;
   } else {
     Caffe::set_root_solver(false);
-    solver_.reset(new WorkerSolver<Dtype>(param, root_solver.get()));
+    //solver_.reset(new WorkerSolver<Dtype>(param, root_solver.get()));
     Caffe::set_root_solver(true);
   }
   this->configure(solver_.get());
@@ -232,7 +239,7 @@ P2PSync<Dtype>::P2PSync(shared_ptr<Solver<Dtype> > root_solver,
     if (access) {
       HIP_CHECK(hipDeviceEnablePeerAccess(peer, 0));
     } else {
-      LOG(INFO)<< "GPU " << device_ << " does not have p2p access to GPU " << peer;
+      DLOG(INFO)<< "GPU " << device_ << " does not have p2p access to GPU " << peer;
     }
     // Allocate receiving buffer on parent
     HIP_CHECK(hipSetDevice(peer));
@@ -391,7 +398,7 @@ void P2PSync<Dtype>::Prepare(const vector<int>& gpus,
   for (int i = 1; i < pairs.size(); ++i) {
     s << (i == 1 ? "" : ", ") << pairs[i].parent() << ":" << pairs[i].device();
   }
-  LOG(INFO)<< "GPUs pairs " << s.str();
+  DLOG(INFO)<< "GPUs pairs " << s.str();
 
   SolverParameter param(solver_->param());
 
@@ -424,7 +431,7 @@ void P2PSync<Dtype>::Run(const vector<int>& gpus) {
   vector<shared_ptr<P2PSync<Dtype> > > syncs(gpus.size());
   Prepare(gpus, &syncs);
 
-  LOG(INFO)<< "Starting Optimization";
+  DLOG(INFO)<< "Starting Optimization";
 
   DLOG(INFO) << "Start " << (syncs.size() - 1) << " threads";
   for (int i = 1; i < syncs.size(); ++i) {
@@ -442,8 +449,358 @@ void P2PSync<Dtype>::Run(const vector<int>& gpus) {
   }
 }
 
+
+
+#ifdef USE_RCCL
+static int getDevice() {
+  int device = 0;
+  HIPCHECK(hipGetDevice(&device));
+  return device;
+}
+
+template<typename Dtype>
+void RCCL<Dtype>::Init() {
+  if (solver_->param().layer_wise_reduce()) {
+    HIPCHECK(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking));
+  } else {
+    //HIPCHECK(hipStreamCreate(&stream_));
+  }
+}
+
+
+template<typename Dtype>
+RCCL<Dtype>::RCCL(shared_ptr<Solver<Dtype> > solver)
+  : GPUParams<Dtype>(solver, getDevice()),
+    comm_(), solver_(solver), barrier_() {
+  DLOG(INFO) << "car_1";
+  this->configure(solver.get());
+  DLOG(INFO) << "car_2";
+  Init();
+  DLOG(INFO) << "car_3";
+}
+
+
+template<typename Dtype>
+RCCL<Dtype>::RCCL(shared_ptr<Solver<Dtype> > solver, const string& uid)
+  : GPUParams<Dtype>(solver, getDevice()),
+    solver_(solver), barrier_() {
+#if 0
+  this->Configure(solver.get());
+  Caffe::set_multiprocess(true);
+  rcclUniqueId rccl_uid;
+  memcpy(&rccl_uid, &uid[0], RCCL_UNIQUE_ID_BYTES);  // NOLINT(caffe/alt_fn)
+  RCCLCHECK(rcclCommInitRank(&comm_,
+                              Caffe::solver_count(),
+                              rccl_uid,
+                              Caffe::solver_rank()));
+  Init();
+#endif
+}
+
+
+template<typename Dtype>
+RCCL<Dtype>::~RCCL() {
+  if (stream_) {
+    LOG(INFO) << "destory 1";
+    HIP_CHECK(hipStreamSynchronize(stream_));
+    LOG(INFO) << "destory 2";
+    HIPCHECK(hipStreamDestroy(stream_));
+    LOG(INFO) << "destory 3";
+  }
+  if (comm_) {
+    rcclCommDestroy(comm_);
+  }
+}
+
+template<typename Dtype>
+void RCCL<Dtype>::InitSingleProcess(vector<RCCL<Dtype>*>* rccls) {
+
+  if (solver_->param().layer_wise_reduce()) {
+    rcclComm_t* comms = new rcclComm_t[rccls->size()];
+    //hipStream_t* streams = new hipStream_t[rccls->size()];
+    int* gpu_list = new int[rccls->size()];
+    for (int i = 0; i < rccls->size(); ++i) {
+      gpu_list[i] = (*rccls)[i]->solver_->param().device_id();
+    }
+    RCCLCHECK(rcclCommInitAll(comms, static_cast<int>(rccls->size()), gpu_list));
+    for (int i = 0; i < rccls->size(); ++i) {
+      (*rccls)[i]->comm_ = comms[i];
+    }
+  } else {
+    rcclComm_t* comms = new rcclComm_t[rccls->size()];
+    hipStream_t* streams = new hipStream_t[rccls->size()];
+    int* gpu_list = new int[rccls->size()];
+    for (int i = 0; i < rccls->size(); ++i) {
+      gpu_list[i] = (*rccls)[i]->solver_->param().device_id();
+    }
+    RCCLCHECK(rcclCommInitAll(comms, static_cast<int>(rccls->size()), gpu_list));
+    for (int i = 0; i < rccls->size(); ++i) {
+      (*rccls)[i]->comm_ = comms[i];
+    
+      HIPCHECK(hipStreamCreate(&streams[i]));
+      (*rccls)[i]->stream_ = streams[i];
+    }
+  } 
+}
+
+#if 0
+template<typename Dtype>
+string RCCL<Dtype>::new_uid() {
+  string uid;
+  uid.resize(RCCL_UNIQUE_ID_BYTES);
+  rcclUniqueId rccl_uid;
+  RCCLCHECK(rcclGetUniqueId(&rccl_uid));
+  memcpy(&uid[0], &rccl_uid, RCCL_UNIQUE_ID_BYTES);  // NOLINT(caffe/alt_fn)
+  return uid;
+}
+#endif 
+
+template<typename Dtype>
+void RCCL<Dtype>::Broadcast() {
+  if (barrier_) {  // NULL in multi process case
+    DLOG(INFO) << "Broadcast 1 E";
+    barrier_->wait();
+    DLOG(INFO) << "Broadcast 1 X";
+  }
+  RCCLCHECK(rcclBcast(data_, static_cast<int>(size_),
+                       rccl::dataType<Dtype>::type, 0,
+                       comm_, stream_));
+  HIP_CHECK(hipStreamSynchronize(stream_));
+  if (barrier_) {
+    DLOG(INFO) << "Broadcast 2 E";
+    barrier_->wait();
+    DLOG(INFO) << "Broadcast 2 X";
+  }
+}
+
+
+
+template<typename Dtype>
+void RCCL<Dtype>::on_gradients_ready() {
+  if (solver_->param().layer_wise_reduce()) {
+    CHECK_EQ(solver_->net()->params().size(),
+             solver_->net()->learnable_params().size())
+      << "Layer-wise reduce is not supported for nets with shared weights.";
+
+      DLOG(INFO) << "on gradients ready (layerwise) E";
+    HIPCHECK(hipStreamSynchronize(stream_));
+      DLOG(INFO) << "on gradients ready (layerwise) X";
+  } else {
+    if (barrier_) {  // NULL in multi process case
+      LOG(INFO) << "on gradients ready E";
+      barrier_->wait();
+      LOG(INFO) << "on gradients ready X";
+    }
+    RCCLCHECK(rcclAllReduce(diff_, diff_, static_cast<int>(size_),
+                             rccl::dataType<Dtype>::type, rcclSum, comm_,
+                             stream_));
+    //HIP_CHECK(hipStreamSynchronize(stream_));
+    caffe_gpu_scal(static_cast<int>(size_),
+                   (Dtype) 1.0 / Caffe::solver_count(), diff_);
+  }
+}
+
+
+
+
+template<typename Dtype>
+class Worker : public InternalThread {
+ public:
+  explicit Worker(shared_ptr<Solver<Dtype> > rank0, int device,
+                  boost::barrier* barrier, vector<RCCL<Dtype>*>* rccls,
+                  const char* restore)
+    : rank0_(rank0), device_(device), barrier_(barrier),
+      rccls_(rccls), restore_(restore) {
+  }
+  virtual ~Worker() {}
+
+ protected:
+  void InternalThreadEntry() {
+    DLOG(INFO) << "InternalThreadEntry E";
+    //Create solver and install callbacks
+    SolverParameter param(rank0_->param());
+    param.set_device_id(device_);
+#if 0
+    int device;
+    HIPCHECK(hipGetDevice(&device));
+    CHECK_EQ(device, device_);
+#endif
+    param.set_type(rank0_->type());
+    shared_ptr<Solver<Dtype> > s(SolverRegistry<Dtype>::CreateSolver(param));
+    CHECK_EQ(s->type(), rank0_->type());
+    if (restore_) {
+       //Could not make RCCL broadcast solver state, it seems to crash
+       //if called in a tight loop, regardless of barriers etc. so
+       //restore all solvers from file.
+      s->Restore(restore_);
+    }
+    RCCL<Dtype> rccl(s);
+    rccl.set_barrier(barrier_);
+    s->add_callback(&rccl);
+    if (s->param().layer_wise_reduce()) {
+      s->net()->add_after_backward(&rccl);
+    }
+    (*rccls_)[Caffe::solver_rank()] = &rccl;
+    //Wait for other threads
+    DLOG(INFO) << "car_work_wait 1 E";
+    barrier_->wait();
+    DLOG(INFO) << "car_work_wait 1 X";
+    //Wait for RCCL init
+    DLOG(INFO) << "car_work_wait 2 E";
+    barrier_->wait();
+    DLOG(INFO) << "car_work_wait 2 X";
+    //Broadcast rank 0 state
+    rccl.Broadcast();
+    //Solve
+    s->Step(param.max_iter() - s->iter());
+    DLOG(INFO) << "car_work_wait 3 E";
+    barrier_->wait();
+    DLOG(INFO) << "car_work_wait 3 X";
+#if 0
+    //Check all solvers have same state
+    SGDSolver<Dtype>* sa = static_cast<SGDSolver<Dtype>*>(rank0_.get());
+    SGDSolver<Dtype>* sb = static_cast<SGDSolver<Dtype>*>(s.get());
+    for (int h = 0; h < sa->history().size(); ++h) {
+      CUDA_CHECK(hipSetDevice(sa->param().device_id()));
+      const Dtype* a = sa->history()[h]->cpu_data();
+      CUDA_CHECK(hipSetDevice(sb->param().device_id()));
+      const Dtype* b = sb->history()[h]->cpu_data();
+      for (int v = 0; v < sa->history()[h]->count(); ++v) {
+        CHECK_DOUBLE_EQ(a[v], b[v]);
+      }
+    }
+#endif
+  }
+
+  shared_ptr<Solver<Dtype> > rank0_;
+  int device_;
+  boost::barrier* barrier_;
+  vector<RCCL<Dtype>*>* rccls_;
+  const char* restore_;
+};
+
+
+
+template<typename Dtype>
+void RCCL<Dtype>::Run(const vector<int>& gpus, const char* restore) {
+  boost::barrier barrier(static_cast<int>(gpus.size()));
+  vector<RCCL<Dtype>*> rccls(gpus.size());
+#if 1
+  //Create workers
+  vector<shared_ptr<Worker<Dtype> > > workers(gpus.size());
+  
+  DLOG(INFO) <<  "param_size:" << size_;
+  DLOG(INFO) <<  "car_size:" << gpus.size();
+  for (int i = 1; i < gpus.size(); ++i) {
+    DLOG(INFO) << gpus[i];
+    HIPCHECK(hipSetDevice(gpus[i]));
+    Caffe::set_solver_rank(i);
+    Worker<Dtype>* w = new Worker<Dtype>(solver_, gpus[i], &barrier,
+                                         &rccls, restore);
+    w->StartInternalThread();
+    workers[i].reset(w);
+  }
+  HIPCHECK(hipSetDevice(gpus[0]));
+  Caffe::set_solver_rank(0);
+  barrier_ = &barrier;
+  solver_->add_callback(this);
+  if (solver_->param().layer_wise_reduce()) {
+    solver_->net()->add_after_backward(this);
+  }
+  rccls[0] = this;
+  //Wait for workers
+  DLOG(INFO) << "car_wait E";
+  barrier.wait();
+  DLOG(INFO) << "car_wait X";
+  //Init RCCL
+  InitSingleProcess(&rccls);
+  DLOG(INFO) << "car_wait E";
+  barrier.wait();
+  DLOG(INFO) << "car_wait X";
+  //Run first solver on current thread
+  Broadcast();
+  solver_->Solve();
+  barrier.wait();  // Hangs without it when running tests
+  //Wait for shutdown
+  for (int i = 1; i < gpus.size(); ++i) {
+    workers[i]->StopInternalThread();
+  }
+#endif
+}
+
+
+template<typename Dtype>
+void RCCL<Dtype>::run(int layer) {
+  CHECK(solver_->param().layer_wise_reduce());
+  vector<shared_ptr<Blob<Dtype> > >& blobs =
+    solver_->net()->layers()[layer]->blobs();
+#ifdef DEBUG
+  //Assert blobs are contiguous to reduce in one step (e.g. bias often small)
+  for (int i = 1; i < blobs.size(); ++i) {
+    CHECK_EQ(blobs[i - 1]->gpu_diff() + blobs[i - 1]->count(),
+             blobs[i + 0]->gpu_diff());
+  }
+#endif
+  if (blobs.size() > 0) {
+    //Make sure default stream is done computing gradients. Could be
+    //replaced by hipEventRecord+hipStreamWaitEvent to avoid
+    //blocking the default stream, but it's actually slower.
+    HIPCHECK(hipStreamSynchronize(stream_));
+
+    //Reduce asynchronously
+    int size = 0;
+    for (int i = 0; i < blobs.size(); ++i) {
+      size += blobs[i]->count();
+    }
+    if (barrier_) {  // NULL in multi process case
+      DLOG(INFO) << "run layer E";
+      barrier_->wait();
+      DLOG(INFO) << "run layer X";
+
+    }
+    RCCLCHECK(rcclAllReduce(blobs[0]->mutable_gpu_diff(),
+                             blobs[0]->mutable_gpu_diff(),
+                             size,
+                             rccl::dataType<Dtype>::type,
+                             rcclSum, comm_, stream_));
+    HIPCHECK(hipStreamSynchronize(stream_));
+    caffe_gpu_scal(size, (Dtype) 1.0 / Caffe::solver_count(),
+                   blobs[0]->mutable_gpu_diff(), stream_);
+  }
+}
+
+#endif 
+
 INSTANTIATE_CLASS(Params);
 INSTANTIATE_CLASS(GPUParams);
 INSTANTIATE_CLASS(P2PSync);
 
+#ifdef USE_RCCL
+INSTANTIATE_CLASS(Worker);
+INSTANTIATE_CLASS(RCCL);
+#endif
+
 }  // namespace caffe
+
+
+int testrccl()
+{
+  int numGpus = 1;
+  hipGetDeviceCount(&numGpus);
+  std::vector<rcclComm_t> comms(numGpus);
+  std::vector<int> device_list{0}; 
+  rcclCommInitAll(comms.data(), numGpus,device_list.data());
+
+  std::vector<float*> sendBuff(numGpus);
+  std::vector<float*> recvBuff(numGpus);
+
+  std::vector<hipStream_t> streams(numGpus);
+
+  for(int i=0;i<numGpus;i++) {
+    hipSetDevice(i);
+    rcclAllReduce(sendBuff[i], recvBuff[i], 0, rcclFloat,
+      rcclSum, comms[i], streams[i]);
+  }
+
+  return 0; 
+}

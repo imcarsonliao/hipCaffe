@@ -245,8 +245,16 @@ int train() {
   }
 
   if (gpus.size() > 1) {
+#ifdef USE_RCCL
+    LOG(INFO) << "USE RCCL";
+    caffe::RCCL<float> rccl(solver);
+    rccl.Run(gpus, FLAGS_snapshot.size() > 0 ? FLAGS_snapshot.c_str() : NULL);
+#else
+    LOG(INFO) << "USE P2PSync";
     caffe::P2PSync<float> sync(solver, NULL, solver->param());
     sync.Run(gpus);
+#endif 
+
   } else {
     LOG(INFO) << "Starting Optimization";
     solver->Solve();

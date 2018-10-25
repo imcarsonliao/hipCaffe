@@ -14,6 +14,11 @@
 #include "caffe/syncedmem.hpp"
 #include "caffe/util/blocking_queue.hpp"
 
+#ifdef USE_RCCL
+#include <boost/thread.hpp>
+#include <rccl/rccl.h>
+#endif 
+
 namespace caffe {
 
 // Represents a net parameters. Once a net is created, its parameter buffers can
@@ -80,6 +85,46 @@ class DevicePair {
   int device_;
 };
 
+#ifdef USE_RCCL
+template<typename Dtype>
+class RCCL : public GPUParams<Dtype>, public Solver<Dtype>::Callback, public Net<Dtype>::Callback
+{
+ public:
+  //single process
+  explicit RCCL(shared_ptr<Solver<Dtype> > solver);
+  //multiple process
+  RCCL(shared_ptr<Solver<Dtype> > solver, const string& uid);
+  virtual ~RCCL();
+
+
+  void Run(const vector<int>& gpus, const char* restore);
+  void Broadcast();
+ 
+  void set_barrier(boost::barrier* value) { barrier_ = value; }
+  boost::barrier* barrier(){ return barrier_; }
+
+
+ protected:
+  void InitSingleProcess(vector<RCCL<Dtype>*>* rccls);
+  void Init();
+  void on_gradients_ready();
+  void run(int layer);
+  void on_start() {}; // from solver
+ 
+ protected:
+  rcclComm_t comm_;
+  shared_ptr<Solver<Dtype> > solver_;
+  hipStream_t stream_;
+  boost::barrier* barrier_;
+
+  using Params<Dtype>::size_;
+  using Params<Dtype>::data_;
+  using Params<Dtype>::diff_;
+};
+#endif
+
+
+
 // Synchronous data parallelism using map-reduce between local GPUs.
 template<typename Dtype>
 class P2PSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
@@ -116,6 +161,6 @@ class P2PSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
   using Params<Dtype>::diff_;
 };
 
-}  // namespace caffe
+};  // namespace caffe
 
 #endif

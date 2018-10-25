@@ -181,8 +181,20 @@ class Caffe {
   // Parallel training info
   inline static int solver_count() { return Get().solver_count_; }
   inline static void set_solver_count(int val) { Get().solver_count_ = val; }
-  inline static bool root_solver() { return Get().root_solver_; }
+  //inline static bool root_solver() { return Get().root_solver_; }
   inline static void set_root_solver(bool val) { Get().root_solver_ = val; }
+
+  // add for parallel training
+  inline static bool root_solver() { return Get().solver_rank_ == 0; }
+  inline static int solver_rank() { return Get().solver_rank_; }
+  inline static void set_solver_rank(int val) { Get().solver_rank_ = val; }
+   
+  #if 0
+  inline static bool multiprocess() { return Get().multiprocess_; }
+  inline static void set_multiprocess(bool val) { Get().multiprocess_ = val; }
+  inline static bool root_solver() { return Get().solver_rank_ == 0; }
+  #endif 
+
 
  protected:
 #ifndef CPU_ONLY
@@ -194,6 +206,11 @@ class Caffe {
   Brew mode_;
   int solver_count_;
   bool root_solver_;
+  // add for parallel training
+  int solver_rank_;
+#if 0
+  bool multiprocess_;
+#endif
 
  private:
   // The private constructor to avoid duplicate instantiation.

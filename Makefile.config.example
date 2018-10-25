@@ -6,6 +6,8 @@
 # MIOpen acceleration switch (uncomment to build with MIOpen).
 USE_MIOPEN := 1
 
+USE_RCCL := 1
+
 # CPU-only switch (uncomment to build without GPU support).
 # CPU_ONLY := 1
 
@@ -67,6 +69,10 @@ ifeq ($(USE_MIOPEN), 1)
         MIOPEN_PATH ?= /opt/rocm
 endif
 
+ifeq ($(USE_RCCL), 1)
+        # MIOpen exists under /opt/rocm/include and /opt/rocm/lib
+        RCCL_PATH ?= /opt/rocm/rccl
+endif
 # BLAS choice:
 # atlas for ATLAS (default)
 # mkl for MKL

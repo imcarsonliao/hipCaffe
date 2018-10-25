@@ -45,7 +45,7 @@ class InternalThread {
 
  private:
   void entry(int device, Caffe::Brew mode, int rand_seed, int solver_count,
-      bool root_solver);
+      int solver_rank);
 
   shared_ptr<boost::thread> thread_;
 };

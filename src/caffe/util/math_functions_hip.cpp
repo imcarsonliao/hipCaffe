@@ -86,6 +86,28 @@ void caffe_gpu_scal<double>(const int N, const double alpha, double *X) {
   HIPBLAS_CHECK(hipblasDscal(Caffe::hipblas_handle(), N, &alpha, X, 1));
 }
 
+
+template <>
+void caffe_gpu_scal<float>(const int N, const float alpha, float* X,
+                           hipStream_t str) {
+  hipStream_t initial_stream;
+  HIPBLAS_CHECK(hipblasGetStream(Caffe::hipblas_handle(), &initial_stream));
+  HIPBLAS_CHECK(hipblasSetStream(Caffe::hipblas_handle(), str));
+  HIPBLAS_CHECK(hipblasSscal(Caffe::hipblas_handle(), N, &alpha, X, 1));
+  HIPBLAS_CHECK(hipblasSetStream(Caffe::hipblas_handle(), initial_stream));
+}
+
+template <>
+void caffe_gpu_scal<double>(const int N, const double alpha, double* X,
+                            hipStream_t str) {
+  hipStream_t initial_stream;
+  HIPBLAS_CHECK(hipblasGetStream(Caffe::hipblas_handle(), &initial_stream));
+  HIPBLAS_CHECK(hipblasSetStream(Caffe::hipblas_handle(), str));
+  HIPBLAS_CHECK(hipblasDscal(Caffe::hipblas_handle(), N, &alpha, X, 1));
+  HIPBLAS_CHECK(hipblasSetStream(Caffe::hipblas_handle(), initial_stream));
+}
+
+
 template <>
 void caffe_gpu_axpby<float>(const int N, const float alpha, const float* X,
     const float beta, float* Y) {
@@ -145,10 +167,12 @@ __global__ void set_kernel(const int n, const Dtype alpha, Dtype* y) {
 
 template <typename Dtype>
 void caffe_gpu_set(const int N, const Dtype alpha, Dtype* Y) {
+#if 0
   if (alpha == 0) {
     HIP_CHECK(hipMemset(Y, 0, sizeof(Dtype) * N));  // NOLINT(caffe/alt_fn)
     return;
   }
+#endif 
   // NOLINT_NEXT_LINE(whitespace/operators)
   hipLaunchKernelGGL(set_kernel<Dtype>, dim3(CAFFE_GET_BLOCKS(N)), dim3(CAFFE_HIP_NUM_THREADS), 0, 0,
       N, alpha, Y);
@@ -367,7 +391,7 @@ DEFINE_AND_INSTANTIATE_GPU_UNARY_FUNC(sign, y[index] = (Dtype(0) < x[index])
                                       - (x[index] < Dtype(0)));
 DEFINE_AND_INSTANTIATE_GPU_UNARY_FUNC(sgnbit, y[index] = signbit(x[index]));
 
-// TODO: currently all RNG routines use CPU logic and the results are just copied onto device buffer for further usage
+// TODO: hiprrently all RNG routines use CPU logic and the results are just copied onto device buffer for further usage
 // Got to have hiprand equivalents for all these
 
 void caffe_gpu_rng_uniform(const int n, unsigned int* r) {

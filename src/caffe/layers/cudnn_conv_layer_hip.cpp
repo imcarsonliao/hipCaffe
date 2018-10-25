@@ -56,7 +56,9 @@ void CuDNNConvolutionLayer<Dtype>::Forward_gpu(
     }
 
     // Synchronize the work across groups.
+    #if 1
     hipDeviceSynchronize();
+    #endif
   }
 #else // ! USE_MIOPEN_FORWARD_CONV
   // Fall back to standard Caffe
@@ -170,7 +172,9 @@ void CuDNNConvolutionLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
     }// for g
 
     // Synchronize the work across groups.
-    hipDeviceSynchronize(); // TODO - could optimize to avoid sync back to host?
+     #if 1
+     hipDeviceSynchronize(); // TODO - could optimize to avoid sync back to host?
+     #endif 
   } // for top.size();
 #endif // USE_MIOPEN_BACKWARD_CONV
 #endif // USE_MIOPEN

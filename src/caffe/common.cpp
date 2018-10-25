@@ -53,7 +53,7 @@ void GlobalInit(int* pargc, char*** pargv) {
 
 Caffe::Caffe()
     : random_generator_(), mode_(Caffe::CPU),
-      solver_count_(1), root_solver_(true) { }
+      solver_count_(1), solver_rank_(0) { }
 
 Caffe::~Caffe() { }
 
@@ -107,7 +107,7 @@ void* Caffe::RNG::generator() {
 Caffe::Caffe() 
   // TODO: HIP Equivalent
    : hipblas_handle_(NULL), hiprand_generator_(NULL), random_generator_(),
-    mode_(Caffe::CPU), solver_count_(1), root_solver_(true) {
+    mode_(Caffe::CPU), solver_count_(1), solver_rank_(0) {
   // Try to create a hipblas handler, and report an error if failed (but we will
   // keep the program running as one might just want to run CPU code).
   if (hipblasCreate(&hipblas_handle_) != HIPBLAS_STATUS_SUCCESS) {

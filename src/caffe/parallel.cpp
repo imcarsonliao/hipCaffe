@@ -12,6 +12,14 @@
 #include "caffe/caffe.hpp"
 #include "caffe/parallel.hpp"
 
+#ifdef USE_RCCL
+#include "rccl/rccl.h"
+#include "rcclCheck.h"
+#endif
+
+
+
+
 namespace caffe {
 
 enum Op {
@@ -227,6 +235,7 @@ P2PSync<Dtype>::P2PSync(shared_ptr<Solver<Dtype> > root_solver,
   if (parent) {
     // Enable p2p access between devices
     const int peer = parent->solver_->param().device_id();
+#if 0
     int access;
     HIP_CHECK(hipDeviceCanAccessPeer(&access, device_, peer));
     if (access) {
@@ -234,6 +243,7 @@ P2PSync<Dtype>::P2PSync(shared_ptr<Solver<Dtype> > root_solver,
     } else {
       LOG(INFO)<< "GPU " << device_ << " does not have p2p access to GPU " << peer;
     }
+#endif 
     // Allocate receiving buffer on parent
     HIP_CHECK(hipSetDevice(peer));
     HIP_CHECK(hipMalloc(&parent_grads_, size_ * sizeof(Dtype)));
@@ -264,6 +274,10 @@ P2PSync<Dtype>::~P2PSync() {
     }
   }
 
+  if (comm_) {
+    rcclCommDestroy(comm_);
+  }
+  
   HIP_CHECK(hipSetDevice(initial_device));
 #endif
 }
@@ -284,6 +298,17 @@ void P2PSync<Dtype>::InternalThreadEntry() {
   solver_->Step(solver_->param().max_iter() - initial_iter_);
 }
 
+#if 0
+template<typename Dtype>
+void P2PSync<Dtype>::on_start() {
+#if 1
+  RCCLCHECK(rcclBcast(data_, static_cast<int>(size_),
+                       rccl::dataType<Dtype>::type, 0,
+                       comm_, hipStreamDefault)); 
+#endif
+}
+
+#else 
 template<typename Dtype>
 void P2PSync<Dtype>::on_start() {
 #ifndef CPU_ONLY
@@ -301,7 +326,7 @@ void P2PSync<Dtype>::on_start() {
     CHECK(parent == parent_);
   }
 
-  // Update children
+ // Update children
   for (int i = children_.size() - 1; i >= 0; i--) {
     Dtype* src = data_;
     Dtype* dst = children_[i]->data_;
@@ -316,12 +341,31 @@ void P2PSync<Dtype>::on_start() {
 
     HIP_CHECK(hipMemcpyAsync(dst, src, size_ * sizeof(Dtype),
         hipMemcpyDeviceToDevice, hipStreamDefault));
+    //hipEventRecord(event_, hipStreamDefault);
+    //hipStreamWaitEvent(hipStreamDefault, event_, 0);
     HIP_CHECK(hipStreamSynchronize(hipStreamDefault));
     children_[i]->queue_.push(this);
   }
 #endif
 }
+#endif
 
+template<typename Dtype>
+void P2PSync<Dtype>::on_gradients_ready() {
+    //if (barrier_) {  
+    //  barrier_->wait();
+    //}
+    RCCLCHECK(rcclReduce(diff_, diff_, static_cast<int>(size_),
+                             rccl::dataType<Dtype>::type, rcclSum, 0, comm_,
+                             hipStreamDefault));
+    if(Caffe::root_solver() ){
+       HIP_CHECK(hipStreamSynchronize(hipStreamDefault));
+       caffe_gpu_scal(static_cast<int>(size_),
+                   (Dtype) 1.0 / Caffe::solver_count(), diff_);
+    }
+}
+
+#if 0
 template<typename Dtype>
 void P2PSync<Dtype>::on_gradients_ready() {
 #ifndef CPU_ONLY
@@ -381,6 +425,9 @@ void P2PSync<Dtype>::on_gradients_ready() {
 #endif
 }
 
+#endif 
+
+
 template<typename Dtype>
 void P2PSync<Dtype>::Prepare(const vector<int>& gpus,
             vector<shared_ptr<P2PSync<Dtype> > >* syncs) {
@@ -392,6 +439,8 @@ void P2PSync<Dtype>::Prepare(const vector<int>& gpus,
     s << (i == 1 ? "" : ", ") << pairs[i].parent() << ":" << pairs[i].device();
   }
   LOG(INFO)<< "GPUs pairs " << s.str();
+
+
 
   SolverParameter param(solver_->param());
 
@@ -412,6 +461,7 @@ void P2PSync<Dtype>::Prepare(const vector<int>& gpus,
         if (parent) {
           param.set_device_id(pairs[i].device());
           syncs->at(i).reset(new P2PSync<Dtype>(solver_, parent, param));
+          syncs->at(i)->p2psyncdevice_ = pairs[i].device();
           parent->children_.push_back((P2PSync<Dtype>*) syncs->at(i).get());
         }
       }
@@ -424,10 +474,34 @@ void P2PSync<Dtype>::Run(const vector<int>& gpus) {
   vector<shared_ptr<P2PSync<Dtype> > > syncs(gpus.size());
   Prepare(gpus, &syncs);
 
+
+  int* gpu_list = new int[gpus.size()];
+  for(int i = 0; i < gpus.size(); i++) {
+     gpu_list[i] = gpus[i];
+  }
+  rcclComm_t* comms = new rcclComm_t[gpus.size()];
+  RCCLCHECK(rcclCommInitAll(comms, static_cast<int>(gpus.size()), gpu_list));
+  hipStream_t* streams = new hipStream_t[gpus.size()];
+  hipEvent_t events[gpus.size()];
+  for(int i = 0; i < gpus.size(); i++) {
+      HIP_CHECK(hipStreamCreate(&streams[i]));
+      hipEventCreate(&events[i]);
+  }
+  comm_ = comms[0];
+  event_ = events[0];
+  stream_ = streams[0];
+
+  //boost::barrier barrier(static_cast<int>(gpus.size())); 
+  //barrier_ = &barrier;
+
   LOG(INFO)<< "Starting Optimization";
 
   DLOG(INFO) << "Start " << (syncs.size() - 1) << " threads";
   for (int i = 1; i < syncs.size(); ++i) {
+    //syncs[i]->barrier_ = &barrier;
+    syncs[i]->comm_ = comms[syncs[i]->p2psyncdevice_];
+    syncs[i]->event_ = events[syncs[i]->p2psyncdevice_];
+    syncs[i]->stream_ = streams[syncs[i]->p2psyncdevice_];
     syncs[i]->StartInternalThread();
   }
 

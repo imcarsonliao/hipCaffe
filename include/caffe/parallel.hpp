@@ -13,6 +13,11 @@
 #include "caffe/solver.hpp"
 #include "caffe/syncedmem.hpp"
 #include "caffe/util/blocking_queue.hpp"
+#ifdef USE_RCCL
+#include "rccl/rccl.h"
+#include "boost/thread.hpp"
+//#include "rcclCheck.h"
+#endif
 
 namespace caffe {
 
@@ -97,7 +102,11 @@ class P2PSync : public GPUParams<Dtype>, public Solver<Dtype>::Callback,
   void Prepare(const vector<int>& gpus,
                vector<shared_ptr<P2PSync<Dtype> > >* syncs);
   inline const int initial_iter() const { return initial_iter_; }
-
+  rcclComm_t comm_;
+  hipStream_t stream_;
+  //boost::barrier* barrier_;
+  int p2psyncdevice_;
+  hipEvent_t event_;
  protected:
   void on_start();
   void on_gradients_ready();

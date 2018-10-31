@@ -359,6 +359,12 @@ endif
 # Disable HIP profiling (removing cxlactivitylogger dependency)
 COMMON_FLAGS += -DDISABLE_HIP_PROFILE
 
+ifeq ($(USE_RCCL), 1)
+        LIBRARIES += rccl
+        COMMON_FLAGS += -DUSE_RCCL
+       INCLUDE_DIRS += $(RCCL_PATH)/include
+       LIBRARY_DIRS += $(RCCL_PATH)/lib
+endif
 # rocBLAS cofiguration.
 ifeq ($(USE_ROCBLAS), 1)
 	COMMON_FLAGS += -DUSE_ROCBLAS
